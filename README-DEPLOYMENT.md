@@ -77,18 +77,17 @@ sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-### C. Clone the Repository on EC2 (First-time setup)
-In your user home directory on EC2:
+### C. Git Repository on EC2 (Automated)
+The pipeline uses GitHub's built-in `GITHUB_TOKEN` to authenticate git operations automatically:
+- If the directory does not exist on EC2, the pipeline **automatically clones** it on the first run.
+- If it already exists, the pipeline safely fetches and syncs the latest commits.
+- You do **not** need to generate or configure GitHub personal access tokens or deploy keys on EC2.
+
+You can also optionally create the external Docker network manually once on EC2:
 ```bash
-# Clone the repository
-git clone https://github.com/<YOUR_USERNAME>/<YOUR_REPOSITORY>.git /home/ubuntu/test-project-python
-
-# Navigate into the project
-cd /home/ubuntu/test-project-python
-
-# Create the external network required by docker-compose.yml
 docker network create my_external_network || true
 ```
+*(The pipeline also ensures this network exists automatically before running `docker compose up`.)*
 
 ---
 

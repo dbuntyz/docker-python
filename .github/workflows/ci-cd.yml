@@ -11,6 +11,9 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   # --------------------------------------------------------------------------
   # 1. LINT JOB: Static analysis & style checking
@@ -118,15 +121,25 @@ jobs:
               TARGET_DIR="/home/${{ secrets.EC2_USER }}/test-project-python"
             fi
 
-            echo "=================================================="
-            echo "--> Navigating to deployment directory: $TARGET_DIR"
-            echo "=================================================="
-            cd "$TARGET_DIR"
+            AUTH_REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
 
-            echo "--> Pulling latest changes from branch ${{ github.ref_name }}..."
-            git fetch origin
-            git checkout ${{ github.ref_name }}
-            git pull origin ${{ github.ref_name }}
+            echo "=================================================="
+            echo "--> Target deployment directory: $TARGET_DIR"
+            echo "=================================================="
+
+            if [ ! -d "$TARGET_DIR/.git" ]; then
+              echo "--> Directory not initialized. Cloning repository using GITHUB_TOKEN..."
+              mkdir -p "$TARGET_DIR"
+              git clone "$AUTH_REPO_URL" "$TARGET_DIR"
+              cd "$TARGET_DIR"
+              git checkout ${{ github.ref_name }}
+            else
+              cd "$TARGET_DIR"
+              echo "--> Fetching and updating branch ${{ github.ref_name }} using GITHUB_TOKEN..."
+              git fetch "$AUTH_REPO_URL" ${{ github.ref_name }}
+              git checkout ${{ github.ref_name }}
+              git reset --hard FETCH_HEAD
+            fi
 
             echo "--> Ensuring external Docker network exists..."
             docker network create my_external_network 2>/dev/null || true
