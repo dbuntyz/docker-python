@@ -1,0 +1,159 @@
+name: CI/CD Pipeline - Lint, Test, and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. LINT JOB: Static analysis & style checking
+  # --------------------------------------------------------------------------
+  lint:
+    name: Lint & Code Style
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Linting Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8
+
+      - name: Run Flake8 Linter
+        run: |
+          # Stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Run full style check according to .flake8 configuration
+          flake8 . --count --statistics
+
+  # --------------------------------------------------------------------------
+  # 2. TEST JOB: Automated unit & integration tests
+  # --------------------------------------------------------------------------
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:alpine
+        ports:
+          - 6371:6371
+        options: >-
+          --health-cmd "redis-cli -p 6371 ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Application and Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f api/requirements.txt ]; then pip install -r api/requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+
+      - name: Run Pytest Suite with Coverage
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: 6371
+        run: |
+          pytest tests/ -v --cov=. --cov-report=term-missing --cov-report=xml
+
+      - name: Upload Test Coverage Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # 3. DEPLOY JOB: SSH to EC2 instance using PEM key & restart containers
+  # --------------------------------------------------------------------------
+  deploy:
+    name: Deploy to EC2 via SSH
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name != 'pull_request'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+
+            TARGET_DIR="${{ secrets.TARGET_DIR }}"
+            if [ -z "$TARGET_DIR" ]; then
+              TARGET_DIR="/home/${{ secrets.EC2_USER }}/test-project-python"
+            fi
+
+            echo "=================================================="
+            echo "--> Navigating to deployment directory: $TARGET_DIR"
+            echo "=================================================="
+            cd "$TARGET_DIR"
+
+            echo "--> Pulling latest changes from branch ${{ github.ref_name }}..."
+            git fetch origin
+            git checkout ${{ github.ref_name }}
+            git pull origin ${{ github.ref_name }}
+
+            echo "--> Ensuring external Docker network exists..."
+            docker network create my_external_network 2>/dev/null || true
+
+            echo "--> Detecting Docker Compose command..."
+            if docker compose version >/dev/null 2>&1; then
+              DOCKER_COMPOSE="docker compose"
+            elif which docker-compose >/dev/null 2>&1; then
+              DOCKER_COMPOSE="docker-compose"
+            else
+              echo "Error: Neither 'docker compose' nor 'docker-compose' was found on EC2!" >&2
+              exit 1
+            fi
+
+            echo "--> Stopping existing services..."
+            $DOCKER_COMPOSE down --remove-orphans || true
+
+            echo "--> Building and starting updated containers in detached mode..."
+            $DOCKER_COMPOSE up -d --build
+
+            echo "--> Cleaning up dangling images..."
+            docker image prune -f
+
+            echo "--> Verifying running services..."
+            sleep 4
+            $DOCKER_COMPOSE ps
+
+            echo "=================================================="
+            echo "--> Deployment successful!"
+            echo "=================================================="

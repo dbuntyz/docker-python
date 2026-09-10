@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flask App</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f4f7fb;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+      }
+      .card {
+        background: white;
+        padding: 2rem 3rem;
+        border-radius: 12px;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+        text-align: center;
+      }
+      h1 {
+        color: #1f2937;
+      }
+      p {
+        color: #4b5563;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Hello from Flask!</h1>
+      <p>Your Flask + Redis project is running successfully with Docker Compose.</p>
+      <div style="margin-top: 1.5rem; padding: 1rem; background: #eef2ff; border-radius: 8px;">
+        <p style="margin: 0; font-weight: bold; color: #4338ca;">Redis Status: {{ redis_status }}</p>
+        <p style="margin: 0.5rem 0 0; font-size: 1.25rem; color: #1e1b4b;">Page visits: <strong>{{ visits }}</strong></p>
+      </div>
+    </div>
+  </body>
+</html>

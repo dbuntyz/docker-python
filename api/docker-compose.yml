@@ -1,0 +1,19 @@
+services:
+  api-service:
+    build: .
+    container_name: separate_api_container
+    ports:
+      - "5001:5001"
+    environment:
+      # Connects directly to 'redis' container via the shared external network
+      - REDIS_HOST=redis
+      - REDIS_PORT=6371
+    volumes:
+      - .:/app
+    networks:
+      - my_external_network
+
+# Connect to existing external network
+networks:
+  my_external_network:
+    external: true
