@@ -114,7 +114,7 @@ jobs:
           port: ${{ secrets.EC2_PORT || 22 }}
           script_stop: true
           script: |
-            set -e
+            set -ex
 
             TARGET_DIR="${{ secrets.TARGET_DIR }}"
             if [ -z "$TARGET_DIR" ]; then
@@ -127,19 +127,29 @@ jobs:
             echo "--> Target deployment directory: $TARGET_DIR"
             echo "=================================================="
 
-            if [ ! -d "$TARGET_DIR/.git" ]; then
-              echo "--> Directory not initialized. Cloning repository using GITHUB_TOKEN..."
-              mkdir -p "$TARGET_DIR"
-              git clone "$AUTH_REPO_URL" "$TARGET_DIR"
-              cd "$TARGET_DIR"
-              git checkout ${{ github.ref_name }}
-            else
-              cd "$TARGET_DIR"
-              echo "--> Fetching and updating branch ${{ github.ref_name }} using GITHUB_TOKEN..."
-              git fetch "$AUTH_REPO_URL" ${{ github.ref_name }}
-              git checkout ${{ github.ref_name }}
-              git reset --hard FETCH_HEAD
+            mkdir -p "$TARGET_DIR"
+            cd "$TARGET_DIR"
+
+            # Avoid dubious ownership warnings from Git
+            git config --global --add safe.directory "$TARGET_DIR" 2>/dev/null || true
+
+            # Initialize repo if not present
+            if [ ! -d ".git" ]; then
+              echo "--> Initializing git repository in $TARGET_DIR..."
+              git init
             fi
+
+            # Always configure origin with the active, valid GITHUB_TOKEN
+            echo "--> Updating remote origin with active GITHUB_TOKEN..."
+            git remote set-url origin "$AUTH_REPO_URL" 2>/dev/null || git remote add origin "$AUTH_REPO_URL"
+
+            echo "--> Fetching latest changes for branch ${{ github.ref_name }}..."
+            git fetch origin ${{ github.ref_name }}
+            git checkout -B ${{ github.ref_name }} FETCH_HEAD
+            git reset --hard FETCH_HEAD
+
+            # Sanitize origin URL so expired tokens are never stored on disk
+            git remote set-url origin "https://github.com/${{ github.repository }}.git" 2>/dev/null || true
 
             echo "--> Detecting Docker access and permissions..."
             if docker info >/dev/null 2>&1; then
