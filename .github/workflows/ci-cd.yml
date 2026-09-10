@@ -53,10 +53,10 @@ jobs:
       redis:
         image: redis:alpine
         ports:
-          - 6371:6371
+          - 6371:6379
         options: >-
-          --health-cmd "redis-cli -p 6371 ping"
-          --health-interval 10s
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
           --health-timeout 5s
           --health-retries 5
 
