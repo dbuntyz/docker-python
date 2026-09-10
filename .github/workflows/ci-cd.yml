@@ -141,18 +141,34 @@ jobs:
               git reset --hard FETCH_HEAD
             fi
 
+            echo "--> Detecting Docker access and permissions..."
+            if docker info >/dev/null 2>&1; then
+              DOCKER_CMD="docker"
+            elif sudo -n docker info >/dev/null 2>&1; then
+              DOCKER_CMD="sudo docker"
+            else
+              echo "Error: Cannot connect to Docker daemon! Ensure your user is in the 'docker' group or has passwordless sudo." >&2
+              exit 1
+            fi
+
             echo "--> Ensuring external Docker network exists..."
-            docker network create my_external_network 2>/dev/null || true
+            $DOCKER_CMD network create my_external_network 2>/dev/null || true
 
             echo "--> Detecting Docker Compose command..."
-            if docker compose version >/dev/null 2>&1; then
-              DOCKER_COMPOSE="docker compose"
+            if $DOCKER_CMD compose version >/dev/null 2>&1; then
+              DOCKER_COMPOSE="$DOCKER_CMD compose"
             elif which docker-compose >/dev/null 2>&1; then
-              DOCKER_COMPOSE="docker-compose"
+              if docker-compose version >/dev/null 2>&1; then
+                DOCKER_COMPOSE="docker-compose"
+              else
+                DOCKER_COMPOSE="sudo docker-compose"
+              fi
             else
               echo "Error: Neither 'docker compose' nor 'docker-compose' was found on EC2!" >&2
               exit 1
             fi
+
+            echo "--> Using Docker command: $DOCKER_COMPOSE"
 
             echo "--> Stopping existing services..."
             $DOCKER_COMPOSE down --remove-orphans || true
@@ -161,7 +177,7 @@ jobs:
             $DOCKER_COMPOSE up -d --build
 
             echo "--> Cleaning up dangling images..."
-            docker image prune -f
+            $DOCKER_CMD image prune -f
 
             echo "--> Verifying running services..."
             sleep 4
