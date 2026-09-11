@@ -1,38 +1,52 @@
 services:
-  # 1. Flask Web Application Service
-  web:
-    build: .
+  # 1. Blue Environment (Host port 5000)
+  web-blue:
+    image: ${DOCKER_IMAGE:-test-project-python:latest}
+    container_name: web-blue
     ports:
       - "5000:5000"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6371
-    volumes:
-      # Mount current directory to /app for live code reloading
-      - .:/app
     depends_on:
       - redis
+    restart: unless-stopped
     networks:
       - my_external_network
 
-  # 2. Redis Database Service (running on port 6371)
+  # 2. Green Environment (Host port 5002)
+  web-green:
+    image: ${DOCKER_IMAGE:-test-project-python:latest}
+    container_name: web-green
+    ports:
+      - "5002:5000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6371
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - my_external_network
+
+  # 3. Redis Database Service (Shared state on port 6371)
   redis:
     image: redis:alpine
+    container_name: redis-service
     command: redis-server --port 6371
     ports:
       - "6371:6371"
     volumes:
-      # Persist Redis database data
       - redis_data:/data
+    restart: unless-stopped
     networks:
       - my_external_network
 
-# Named volume for Redis data storage
+# Named volume for Redis data persistence
 volumes:
   redis_data:
 
-# Network configuration
+# External Docker network shared across services
 networks:
-  # Connect to an external network created outside this Compose file
   my_external_network:
     external: true

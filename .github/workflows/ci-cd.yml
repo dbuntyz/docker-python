@@ -1,4 +1,4 @@
-name: CI/CD Pipeline - Lint, Test, and Deploy to EC2
+name: CI/CD Pipeline - Security, Test, Docker Hub & Blue/Green Deploy
 
 on:
   push:
@@ -13,11 +13,29 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
-  # --------------------------------------------------------------------------
-  # 1. LINT JOB: Static analysis & style checking
-  # --------------------------------------------------------------------------
+  # ============================================================================
+  # 1. GITLEAKS JOB: Automated Secret & Credential Detection
+  # ============================================================================
+  gitleaks:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks Scanner
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================================
+  # 2. LINT JOB: Static Analysis & Code Style
+  # ============================================================================
   lint:
     name: Lint & Code Style
     runs-on: ubuntu-latest
@@ -43,9 +61,9 @@ jobs:
           # Run full style check according to .flake8 configuration
           flake8 . --count --statistics
 
-  # --------------------------------------------------------------------------
-  # 2. TEST JOB: Automated unit & integration tests
-  # --------------------------------------------------------------------------
+  # ============================================================================
+  # 3. TEST JOB: Automated Unit & Integration Tests
+  # ============================================================================
   test:
     name: Unit & Integration Tests
     runs-on: ubuntu-latest
@@ -92,20 +110,125 @@ jobs:
           path: coverage.xml
           if-no-files-found: ignore
 
-  # --------------------------------------------------------------------------
-  # 3. DEPLOY JOB: SSH to EC2 instance using PEM key & restart containers
-  # --------------------------------------------------------------------------
-  deploy:
-    name: Deploy to EC2 via SSH
-    needs: [lint, test]
+  # ============================================================================
+  # 4. TRIVY FS JOB: Filesystem & Dependency Vulnerability Scan
+  # ============================================================================
+  trivy-fs:
+    name: Trivy Vulnerability Scan (Filesystem)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner on repository files
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          scan-type: 'fs'
+          ignore-unfixed: true
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          output: 'trivy-fs-report.txt'
+
+      - name: Display Trivy FS Scan Results
+        if: always()
+        run: |
+          if [ -f trivy-fs-report.txt ]; then
+            cat trivy-fs-report.txt
+          fi
+
+  # ============================================================================
+  # 5. BUILD & PUSH JOB: Docker Hub Buildx, Trivy Image Scan & Push
+  # ============================================================================
+  build-and-push:
+    name: Build, Scan & Push to Docker Hub
+    needs: [gitleaks, lint, test, trivy-fs]
     runs-on: ubuntu-latest
     if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name != 'pull_request'
+    outputs:
+      image_tag: ${{ steps.image-names.outputs.image_tag }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Deploy to EC2 via SSH
+      - name: Compute Docker Image Names and Tags
+        id: image-names
+        run: |
+          # Set Docker repository (default to test-project-python if not explicitly set)
+          REPO_NAME="${{ secrets.DOCKERHUB_REPOSITORY }}"
+          if [ -z "$REPO_NAME" ]; then
+            REPO_NAME="test-project-python"
+          fi
+          DOCKERHUB_USER="${{ secrets.DOCKERHUB_USERNAME }}"
+          FULL_IMAGE="${DOCKERHUB_USER}/${REPO_NAME}"
+          SHA_TAG="${FULL_IMAGE}:${{ github.sha }}"
+          LATEST_TAG="${FULL_IMAGE}:latest"
+
+          echo "image_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_latest=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "full_image=${FULL_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Load Docker Image locally for Trivy Scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.image-names.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy Scan on Container Image
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          image-ref: ${{ steps.image-names.outputs.image_tag }}
+          scan-type: 'image'
+          ignore-unfixed: true
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push Container Image to Docker Hub (SHA and latest tags)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image-names.outputs.image_tag }}
+            ${{ steps.image-names.outputs.image_latest }}
+          cache-from: type=gha
+
+  # ============================================================================
+  # 6. DEPLOY JOB: Zero-Downtime Blue/Green Deployment to EC2 via SSH
+  # ============================================================================
+  deploy:
+    name: Zero-Downtime Blue/Green Deploy (EC2)
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name != 'pull_request'
+
+    steps:
+      - name: Check out repository deployment files
+        uses: actions/checkout@v4
+
+      - name: Copy Compose and Blue/Green script to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_PORT || 22 }}
+          source: "docker-compose.yml,scripts/deploy-blue-green.sh"
+          target: "${{ secrets.TARGET_DIR || format('/home/{0}/test-project-python', secrets.EC2_USER) }}"
+
+      - name: Deploy Image from Docker Hub via Blue/Green Script
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -120,79 +243,44 @@ jobs:
             if [ -z "$TARGET_DIR" ]; then
               TARGET_DIR="/home/${{ secrets.EC2_USER }}/test-project-python"
             fi
-
-            AUTH_REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            DEPLOY_IMAGE="${{ needs.build-and-push.outputs.image_tag }}"
 
             echo "=================================================="
             echo "--> Target deployment directory: $TARGET_DIR"
+            echo "--> Pulling & Deploying Docker Hub Image: $DEPLOY_IMAGE"
             echo "=================================================="
 
-            mkdir -p "$TARGET_DIR"
             cd "$TARGET_DIR"
 
-            # Avoid dubious ownership warnings from Git
-            git config --global --add safe.directory "$TARGET_DIR" 2>/dev/null || true
+            # Ensure blue-green deployment script is executable
+            chmod +x scripts/deploy-blue-green.sh
 
-            # Initialize repo if not present
-            if [ ! -d ".git" ]; then
-              echo "--> Initializing git repository in $TARGET_DIR..."
-              git init
+            # Ensure Nginx conf.d directory and initial upstream file exist if missing
+            sudo mkdir -p /etc/nginx/conf.d
+            if [ ! -f /etc/nginx/conf.d/flask_upstream.conf ]; then
+              echo "--> Initializing /etc/nginx/conf.d/flask_upstream.conf..."
+              sudo tee /etc/nginx/conf.d/flask_upstream.conf > /dev/null << 'EOF'
+            upstream flask_web_backend {
+                server 127.0.0.1:5000;
+                keepalive 32;
+            }
+            EOF
             fi
 
-            # Always configure origin with the active, valid GITHUB_TOKEN
-            echo "--> Updating remote origin with active GITHUB_TOKEN..."
-            git remote set-url origin "$AUTH_REPO_URL" 2>/dev/null || git remote add origin "$AUTH_REPO_URL"
-
-            echo "--> Fetching latest changes for branch ${{ github.ref_name }}..."
-            git fetch origin ${{ github.ref_name }}
-            git checkout -B ${{ github.ref_name }} FETCH_HEAD
-            git reset --hard FETCH_HEAD
-
-            # Sanitize origin URL so expired tokens are never stored on disk
-            git remote set-url origin "https://github.com/${{ github.repository }}.git" 2>/dev/null || true
-
-            echo "--> Detecting Docker access and permissions..."
-            if docker info >/dev/null 2>&1; then
-              DOCKER_CMD="docker"
-            elif sudo -n docker info >/dev/null 2>&1; then
-              DOCKER_CMD="sudo docker"
-            else
-              echo "Error: Cannot connect to Docker daemon! Ensure your user is in the 'docker' group or has passwordless sudo." >&2
-              exit 1
-            fi
-
-            echo "--> Ensuring external Docker network exists..."
-            $DOCKER_CMD network create my_external_network 2>/dev/null || true
-
-            echo "--> Detecting Docker Compose command..."
-            if $DOCKER_CMD compose version >/dev/null 2>&1; then
-              DOCKER_COMPOSE="$DOCKER_CMD compose"
-            elif which docker-compose >/dev/null 2>&1; then
-              if docker-compose version >/dev/null 2>&1; then
-                DOCKER_COMPOSE="docker-compose"
-              else
-                DOCKER_COMPOSE="sudo docker-compose"
+            # Authenticate Docker daemon to Docker Hub if private repo access needed
+            if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+              echo "--> Authenticating Docker daemon on EC2 to Docker Hub..."
+              if docker info >/dev/null 2>&1; then
+                echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin || true
+              elif sudo -n docker info >/dev/null 2>&1; then
+                echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin || true
               fi
-            else
-              echo "Error: Neither 'docker compose' nor 'docker-compose' was found on EC2!" >&2
-              exit 1
             fi
 
-            echo "--> Using Docker command: $DOCKER_COMPOSE"
-
-            echo "--> Stopping existing services..."
-            $DOCKER_COMPOSE down --remove-orphans || true
-
-            echo "--> Building and starting updated containers in detached mode..."
-            $DOCKER_COMPOSE up -d --build
-
-            echo "--> Cleaning up dangling images..."
-            $DOCKER_CMD image prune -f
-
-            echo "--> Verifying running services..."
-            sleep 4
-            $DOCKER_COMPOSE ps
+            # Execute Zero-Downtime Blue/Green Deployment
+            echo "--> Executing Blue/Green zero-downtime deployment..."
+            ./scripts/deploy-blue-green.sh "$DEPLOY_IMAGE"
 
             echo "=================================================="
-            echo "--> Deployment successful!"
+            echo "--> Blue/Green Deployment successfully verified!"
             echo "=================================================="

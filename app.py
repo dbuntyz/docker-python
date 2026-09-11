@@ -40,6 +40,21 @@ def api_counter():
         }, 500
 
 
+@app.route('/healthz')
+def healthz():
+    try:
+        redis_client.ping()
+        redis_status = 'Connected'
+    except Exception as e:
+        redis_status = f'Disconnected: {e}'
+
+    return {
+        'status': 'healthy',
+        'service': 'flask-web',
+        'redis_status': redis_status
+    }, 200
+
+
 @app.errorhandler(404)
 def not_found(e):
     return {

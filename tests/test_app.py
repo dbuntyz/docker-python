@@ -69,3 +69,30 @@ def test_not_found_handler(web_client):
     data = response.get_json()
     assert 'error' in data
     assert data['error']['code'] == 'NOT_FOUND'
+
+
+def test_healthz_endpoint_healthy(web_client):
+    """Test GET /healthz returns healthy status."""
+    response = web_client.get('/healthz')
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data['status'] == 'healthy'
+    assert data['service'] == 'flask-web'
+    assert data['redis_status'] == 'Connected'
+
+
+def test_healthz_endpoint_redis_disconnected(web_client):
+    """Test GET /healthz reports disconnected Redis when ping fails."""
+    original_client = main_app_module.redis_client
+    broken_redis = MagicMock()
+    broken_redis.ping.side_effect = Exception("Connection lost")
+    main_app_module.redis_client = broken_redis
+
+    try:
+        response = web_client.get('/healthz')
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['status'] == 'healthy'
+        assert "Disconnected: Connection lost" in data['redis_status']
+    finally:
+        main_app_module.redis_client = original_client

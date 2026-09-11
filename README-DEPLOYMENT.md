@@ -1,11 +1,14 @@
-# EC2 CI/CD Deployment Guide (GitHub Actions + SSH PEM Key)
+# Production CI/CD & Deployment Guide (DevSecOps + Blue/Green)
 
-This project includes an automated GitHub Actions CI/CD pipeline defined in [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml).
+This repository features a hardened, production-grade GitHub Actions CI/CD pipeline defined in [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml).
 
-The pipeline automatically:
-1. **Lints** the codebase using `flake8`.
-2. **Runs automated tests** with `pytest`, spinning up an ephemeral Redis test service container and generating test coverage reports.
-3. **Deploys via SSH to your AWS EC2 instance** using your PEM private key on any push to `main` (or `master`).
+The pipeline incorporates:
+1. **Secret Scanning (Gitleaks)**: Scans commits and history to prevent sensitive keys/tokens from being leaked.
+2. **Static Analysis & Linting (Flake8)**: Enforces Python code quality.
+3. **Automated Unit & Integration Tests (Pytest)**: Runs tests against an ephemeral Redis service with coverage reporting.
+4. **Vulnerability Scanning (Trivy Filesystem & Container Image)**: Scans repository dependencies, Dockerfile, and container image for CVEs before deployment.
+5. **Container Registry (Docker Hub)**: Builds multi-layer images with Buildx caching and pushes immutable SHA-tagged releases.
+6. **Zero-Downtime Blue/Green Deployment**: Automates zero-downtime container swapping on AWS EC2 with health verification and instant Nginx upstream reload.
 
 ---
 
@@ -18,110 +21,110 @@ Add the following secrets:
 
 | Secret Name | Description | Example Value |
 |---|---|---|
-| `EC2_HOST` | Public IP address or Public DNS of your EC2 instance | `3.85.120.45` or `ec2-3-85-120-45.compute-1.amazonaws.com` |
-| `EC2_USER` | SSH username for the EC2 instance | `ubuntu` (for Ubuntu) or `ec2-user` (for Amazon Linux) |
+| `DOCKERHUB_USERNAME` | Docker Hub username or organization | `myusername` |
+| `DOCKERHUB_TOKEN` | Docker Hub Personal Access Token (Read/Write) | `dckr_pat_xxxxxxxxxxxx` |
+| `DOCKERHUB_REPOSITORY` | *(Optional)* Docker Hub repository name (defaults to `test-project-python`) | `test-project-python` |
+| `EC2_HOST` | Public IP address or Public DNS of your EC2 instance | `35.154.69.69` |
+| `EC2_USER` | SSH username for the EC2 instance | `ubuntu` |
 | `EC2_SSH_KEY` | Entire content of your `.pem` private key file | See instructions below |
-| `TARGET_DIR` | (Optional) Full path to the repository on your EC2 instance | `/home/ubuntu/test-project-python` (defaults to `/home/<EC2_USER>/test-project-python`) |
-| `EC2_PORT` | (Optional) SSH port | `22` (default) |
+| `TARGET_DIR` | *(Optional)* Full path to project on EC2 | `/home/ubuntu/test-project-python` |
+| `EC2_PORT` | *(Optional)* SSH port | `22` (default) |
 
 ### How to format `EC2_SSH_KEY`:
-Open your `.pem` file with a text editor (e.g. Notepad, VS Code) and copy the **entire** content including header and footer:
+Open your `.pem` file with a text editor and copy the **entire** content including header and footer:
 
 ```text
 -----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEA...
 ...
-...
 -----END RSA PRIVATE KEY-----
 ```
-*(Or `-----BEGIN OPENSSH PRIVATE KEY-----` ... `-----END OPENSSH PRIVATE KEY-----`)*
 
 ---
 
-## 2. AWS EC2 Instance Prerequisites
-
-Before running the deployment for the first time, ensure the EC2 instance is prepared:
-
-### A. AWS Security Group (Firewall)
-Ensure your EC2 Security Group allows inbound SSH traffic:
-- **Type**: SSH
-- **Protocol**: TCP
-- **Port Range**: `22`
-- **Source**: `0.0.0.0/0` (or restricted to GitHub's runner IP ranges for higher security)
-
-### B. Install Docker & Docker Compose on EC2
-Connect to your EC2 instance via SSH:
-```bash
-ssh -i /path/to/your-key.pem ubuntu@<EC2_PUBLIC_IP>
-```
-
-Run the following commands on the EC2 instance (Ubuntu):
-```bash
-# 1. Update packages and install Docker
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-echo \
-  "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-# 2. Allow non-root user to run Docker commands
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-### C. Git Repository on EC2 (Automated)
-The pipeline uses GitHub's built-in `GITHUB_TOKEN` to authenticate git operations automatically:
-- If the directory does not exist on EC2, the pipeline **automatically clones** it on the first run.
-- If it already exists, the pipeline safely fetches and syncs the latest commits.
-- You do **not** need to generate or configure GitHub personal access tokens or deploy keys on EC2.
-
-You can also optionally create the external Docker network manually once on EC2:
-```bash
-docker network create my_external_network || true
-```
-*(The pipeline also ensures this network exists automatically before running `docker compose up`.)*
-
----
-
-## 3. How the Pipeline Works
+## 2. Pipeline Architecture & Workflow
 
 ```mermaid
-flowchart LR
-    A[Push / PR to main] --> B[Job 1: Linting]
-    A --> C[Job 2: Pytest & Coverage]
-    B --> D{Lint & Tests Pass?}
-    C --> D
-    D -- Yes (Push to main) --> E[Job 3: Deploy to EC2 via SSH]
-    D -- No / PR --> F[Stop Pipeline]
-    E --> G[Pull latest code on EC2]
-    G --> H[Rebuild & Restart Docker Containers]
-    H --> I[Deployment Complete]
-```
+flowchart TD
+    subgraph CI["CI & Security Gates"]
+        A[Push / PR] --> B[Job 1: Gitleaks Secret Scan]
+        A --> C[Job 2: Flake8 Code Style]
+        A --> D[Job 3: Pytest & Redis Coverage]
+        A --> E[Job 4: Trivy FS Vulnerability Scan]
+    end
 
-1. **Lint Job**:
-   Runs `flake8 .` enforcing code style and catching syntax errors before any tests or deployment.
-2. **Test Job**:
-   Launches a background `redis:alpine` service on port 6371 and runs `pytest tests/` with full test coverage metrics.
-3. **Deploy Job**:
-   Uses `appleboy/ssh-action` to connect securely to your EC2 instance with the PEM private key, pulls the latest code from GitHub, ensures the external Docker network is present, and restarts the containers using `docker compose up -d --build`.
+    subgraph CD_REGISTRY["Container Build & Registry"]
+        B & C & D & E --> F{All CI Gates Pass?}
+        F -- Yes (main branch) --> G[Job 5: Docker Buildx Build]
+        G --> H[Trivy Container Image Scan]
+        H --> I[Push to Docker Hub :sha and :latest]
+    end
+
+    subgraph CD_DEPLOY["Zero-Downtime Blue/Green Deployment (EC2)"]
+        I --> J[Job 6: SSH to EC2]
+        J --> K[Pull latest image from Docker Hub]
+        K --> L[Detect active color: Blue:5000 or Green:5002]
+        L --> M[Start idle container with new image]
+        M --> N{Health Check /healthz?}
+        N -- Failed --> O[Tear down idle container\nActive remains safe & live]
+        N -- Passed --> P[Switch Nginx upstream & reload nginx]
+        P --> Q[Stop previous active container]
+        Q --> R[Deployment Complete - Zero Downtime]
+    end
+```
 
 ---
 
-## 4. Local Testing & Verification
+## 3. How Blue/Green Deployment Works on EC2
 
-You can run the same linting and tests locally anytime:
+The deployment script [`scripts/deploy-blue-green.sh`](scripts/deploy-blue-green.sh) coordinates zero-downtime updates:
+
+| Environment | Service Name in Compose | Host Port | Status |
+|---|---|---|---|
+| **Blue** | `web-blue` | `5000` | Alternates between Active and Idle |
+| **Green** | `web-green` | `5002` | Alternates between Active and Idle |
+| **Redis** | `redis-service` | `6371` | Shared across both environments |
+
+### Zero-Downtime Cutover Process:
+1. **Detect Active Environment**: The script reads `/etc/nginx/conf.d/flask_upstream.conf` or inspects running containers.
+2. **Deploy to Idle Environment**: The new version from Docker Hub is launched on the idle port (`5000` or `5002`).
+3. **Automated Health Check**: The script queries `http://127.0.0.1:<target_port>/healthz` up to 12 times (every 3 seconds).
+   - If the health check **fails**, the idle container is automatically stopped and removed. The live container is never touched, and the pipeline fails safely.
+4. **Nginx Upstream Reload**: If the health check **passes**, the script updates `/etc/nginx/conf.d/flask_upstream.conf`, validates the syntax (`nginx -t`), and gracefully reloads Nginx (`systemctl reload nginx`).
+5. **Old Container Teardown**: The old container is gracefully stopped, and dangling Docker images are pruned.
+
+---
+
+## 4. Nginx Server Configuration
+
+On your EC2 host, the Nginx configuration at `/etc/nginx/sites-enabled/task.techokay.in` includes the dynamic upstream file:
+
+```nginx
+# Include the dynamic Blue/Green upstream definition
+include /etc/nginx/conf.d/flask_upstream.conf;
+```
+
+Where `/etc/nginx/conf.d/flask_upstream.conf` is dynamically maintained:
+```nginx
+upstream flask_web_backend {
+    server 127.0.0.1:5000; # or 127.0.0.1:5002
+    keepalive 32;
+}
+```
+
+Reference templates are available in:
+- [`nginx/task.techokay.in.conf`](nginx/task.techokay.in.conf)
+- [`nginx/conf.d/flask_upstream.conf`](nginx/conf.d/flask_upstream.conf)
+
+---
+
+## 5. Local Testing & Verification
+
+You can run local linting and tests anytime before committing:
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt -r requirements-dev.txt
+# Activate virtual environment
+source .venv/bin/activate  # Or .\.venv\Scripts\Activate.ps1 on Windows
 
 # Run linter
 flake8 .
