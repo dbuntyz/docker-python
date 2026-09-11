@@ -154,10 +154,13 @@ jobs:
       - name: Compute Docker Image Names and Tags
         id: image-names
         run: |
-          # Set Docker repository (default to test-project-python if not explicitly set)
+          # Set Docker repository (defaults to repository name e.g. docker-python)
           REPO_NAME="${{ secrets.DOCKERHUB_REPOSITORY }}"
           if [ -z "$REPO_NAME" ]; then
-            REPO_NAME="test-project-python"
+            REPO_NAME="${{ github.event.repository.name }}"
+          fi
+          if [ -z "$REPO_NAME" ]; then
+            REPO_NAME="docker-python"
           fi
           DOCKERHUB_USER="${{ secrets.DOCKERHUB_USERNAME }}"
           FULL_IMAGE="${DOCKERHUB_USER}/${REPO_NAME}"

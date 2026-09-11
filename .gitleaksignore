@@ -1,0 +1,3 @@
+# Gitleaks ignore file
+# False positive documentation example in README-DEPLOYMENT.md
+9fcf9daaab92f93904968805d017c3f7d811e1e2:README-DEPLOYMENT.md:private-key:31

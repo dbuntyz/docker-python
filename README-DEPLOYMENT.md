@@ -34,10 +34,10 @@ Add the following secrets:
 Open your `.pem` file with a text editor and copy the **entire** content including header and footer:
 
 ```text
------BEGIN RSA PRIVATE KEY-----
+-----BEGIN [RSA/OPENSSH] PRIVATE KEY-----
 MIIEowIBAAKCAQEA...
 ...
------END RSA PRIVATE KEY-----
+-----END [RSA/OPENSSH] PRIVATE KEY-----
 ```
 
 ---
