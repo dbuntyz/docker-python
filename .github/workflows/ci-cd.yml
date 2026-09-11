@@ -229,7 +229,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           port: ${{ secrets.EC2_PORT || 22 }}
           source: "docker-compose.yml,scripts/deploy-blue-green.sh"
-          target: "${{ secrets.TARGET_DIR || format('/home/{0}/test-project-python', secrets.EC2_USER) }}"
+          target: "${{ secrets.TARGET_DIR || '/home/ubuntu/test-project-python' }}"
 
       - name: Deploy Image from Docker Hub via Blue/Green Script
         uses: appleboy/ssh-action@v1.2.0
